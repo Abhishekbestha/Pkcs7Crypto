@@ -292,7 +292,8 @@ public class Pkcs7Crypto {
             if (Security.getProvider("EM") == null) {
                 Security.addProvider(new org.bouncycastle.jce.provider.emCastleProvider());
             }
-            JcaX509CertificateConverter certConverter = new JcaX509CertificateConverter().setProvider("EM");
+            // Don't explicitly set provider to avoid JCE authentication error
+            JcaX509CertificateConverter certConverter = new JcaX509CertificateConverter();
 
             for (SignerInformation signer : signers) {
                 Collection<?> certCollection = certStore.getMatches(signer.getSID());
@@ -309,9 +310,8 @@ public class Pkcs7Crypto {
                     System.out.println("Found certificate in PKCS#7: " + pkcs7Cert.getSubjectDN());
 
                     try {
-                        // Build verifier with EM provider
+                        // Build verifier without explicitly specifying provider to avoid JCE authentication error
                         SignerInformationVerifier verifier = new JcaSimpleSignerInfoVerifierBuilder()
-                                .setProvider("EM")
                                 .build(certHolder);
 
                         if (signer.verify(verifier)) {
@@ -329,9 +329,9 @@ public class Pkcs7Crypto {
                         System.out.println("⚠️ Certificate not valid at signing time, verifying signature cryptographically only...");
                         try {
                             // Use Java Signature API directly to verify without time checks
+                            // Don't explicitly specify provider to avoid JCE authentication error
                             java.security.Signature sig = java.security.Signature.getInstance(
-                                    signer.getDigestAlgOID().equals("2.16.840.1.101.3.4.2.1") ? "SHA256withRSA" : "SHA1withRSA",
-                                    "EM");
+                                    signer.getDigestAlgOID().equals("2.16.840.1.101.3.4.2.1") ? "SHA256withRSA" : "SHA1withRSA");
                             sig.initVerify(pkcs7Cert.getPublicKey());
 
                             // Get the signed attributes (the data that was actually signed)
@@ -353,7 +353,7 @@ public class Pkcs7Crypto {
                                 response.put("status", false);
                                 response.put("message", "❌ Signature cryptographically invalid for: " + pkcs7Cert.getSubjectDN());
                             }
-                        } catch (IOException | InvalidKeyException | NoSuchAlgorithmException | NoSuchProviderException | SignatureException ex) {
+                        } catch (IOException | InvalidKeyException | NoSuchAlgorithmException | SignatureException ex) {
                             System.out.println("❌ Failed to verify signature: " + ex.getMessage());
                             throw new Exception("❌ Failed to verify signature: " + ex.getMessage());
                         }
@@ -439,9 +439,12 @@ public class Pkcs7Crypto {
         }
 
         boolean signatureValid = false;
-        // Make sure BC provider is registered
-        Security.addProvider(new org.bouncycastle.jce.provider.emCastleProvider());
-        JcaX509CertificateConverter certConverter = new JcaX509CertificateConverter().setProvider("EM");
+        // Make sure EM provider is registered
+        if (Security.getProvider("EM") == null) {
+            Security.addProvider(new org.bouncycastle.jce.provider.emCastleProvider());
+        }
+        // Don't explicitly set provider to avoid JCE authentication error
+        JcaX509CertificateConverter certConverter = new JcaX509CertificateConverter();
 
         for (SignerInformation signer : signers) {
             Collection<?> certCollection = certStore.getMatches(signer.getSID());
@@ -451,9 +454,8 @@ public class Pkcs7Crypto {
 
                 if (pkcs7Cert.equals(x509Cert)) {
                     try {
-                        // Build verifier with EM provider
+                        // Build verifier without explicitly specifying provider to avoid JCE authentication error
                         SignerInformationVerifier verifier = new JcaSimpleSignerInfoVerifierBuilder()
-                                .setProvider("EM")
                                 .build(certHolder);
 
                         if (signer.verify(verifier)) {
@@ -467,9 +469,9 @@ public class Pkcs7Crypto {
                         System.out.println("⚠️ Certificate not valid at signing time, verifying signature cryptographically only...");
                         try {
                             // Use Java Signature API directly to verify without time checks
+                            // Don't explicitly specify provider to avoid JCE authentication error
                             java.security.Signature sig = java.security.Signature.getInstance(
-                                    signer.getDigestAlgOID().equals("2.16.840.1.101.3.4.2.1") ? "SHA256withRSA" : "SHA1withRSA",
-                                    "EM");
+                                    signer.getDigestAlgOID().equals("2.16.840.1.101.3.4.2.1") ? "SHA256withRSA" : "SHA1withRSA");
                             sig.initVerify(pkcs7Cert.getPublicKey());
 
                             // Get the signed attributes (the data that was actually signed)
