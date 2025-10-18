@@ -44,6 +44,7 @@ import org.bouncycastle.cms.SignerInformationStore;
 import org.bouncycastle.cms.SignerInformationVerifier;
 import org.bouncycastle.cms.jcajce.JcaSignerInfoGeneratorBuilder;
 import org.bouncycastle.cms.jcajce.JcaSimpleSignerInfoVerifierBuilder;
+import org.bouncycastle.jce.provider.emCastleProvider;
 import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.operator.jcajce.JcaDigestCalculatorProviderBuilder;
@@ -71,10 +72,50 @@ public class Pkcs7Crypto {
             byte[] data = payload.getBytes("UTF-8");
 
             // ----------- 2. Load Certificate & Private Key -----------
-            KeyStore ks = KeyStore.getInstance("PKCS12");
-            ks.load(new FileInputStream(pfxPath), pfxPwd.toCharArray());
+            // Add BouncyCastle provider if not already registered
+            // Add at a lower priority to avoid authentication issues during keystore loading
+            if (Security.getProvider("EM") == null) {
+                Security.addProvider(new emCastleProvider());
+                System.out.println("DEBUG: EM provider registered");
+            }
+
+            // Load keystore - need to handle the unsigned provider issue
+            KeyStore ks = null;
+            FileInputStream fis = null;
+            try {
+                // Try to load with automatic provider selection
+                ks = KeyStore.getInstance("PKCS12");
+                fis = new FileInputStream(pfxPath);
+                ks.load(fis, pfxPwd.toCharArray());
+                System.out.println("DEBUG: Successfully loaded PFX file");
+            } catch (IOException e) {
+                // If we get a SecurityException wrapped in IOException, try with BouncyCastle explicitly bypassed
+                if (e.getMessage() != null && e.getMessage().contains("JCE cannot authenticate")) {
+                    System.out.println("DEBUG: Retrying without provider authentication...");
+                    // Remove the EM provider temporarily
+                    Security.removeProvider("EM");
+                    // Try with just the default providers
+                    try {
+                        ks = KeyStore.getInstance("PKCS12");
+                        if (fis != null) fis.close();
+                        fis = new FileInputStream(pfxPath);
+                        ks.load(fis, pfxPwd.toCharArray());
+                        System.out.println("DEBUG: Loaded without EM provider");
+                    } finally {
+                        // Add EM provider back for signing operations
+                        if (Security.getProvider("EM") == null) {
+                            Security.addProvider(new emCastleProvider());
+                        }
+                    }
+                } else {
+                    throw e;
+                }
+            } finally {
+                if (fis != null) fis.close();
+            }
+
             String alias = ks.aliases().nextElement();
-            PrivateKey privateKey = (PrivateKey) ks.getKey(alias, "emudhra".toCharArray());
+            PrivateKey privateKey = (PrivateKey) ks.getKey(alias, pfxPwd.toCharArray());
             X509Certificate cert = (X509Certificate) ks.getCertificate(alias);
 
             // ----------- 3. Create PKCS#7 Signature -----------
@@ -332,10 +373,40 @@ public class Pkcs7Crypto {
     }
 
     public static boolean verifyPKCS7WithPFX(String pkcs7DataBase64, byte[] detachedContent, String pfxPath, String pfxPwd, String pfxAlias) throws Exception {
+        // Add BouncyCastle provider if not already registered
+        if (Security.getProvider("EM") == null) {
+            Security.addProvider(new emCastleProvider());
+            System.out.println("DEBUG: EM provider registered");
+        }
+
         // Load the PFX keystore
-        KeyStore keyStore = KeyStore.getInstance("PKCS12");
-        try (FileInputStream fis = new FileInputStream(pfxPath)) {
+        KeyStore keyStore = null;
+        FileInputStream fis = null;
+        try {
+            keyStore = KeyStore.getInstance("PKCS12");
+            fis = new FileInputStream(pfxPath);
             keyStore.load(fis, pfxPwd.toCharArray());
+            System.out.println("DEBUG: Successfully loaded PFX file");
+        } catch (IOException e) {
+            if (e.getMessage() != null && e.getMessage().contains("JCE cannot authenticate")) {
+                System.out.println("DEBUG: Retrying without provider authentication...");
+                Security.removeProvider("EM");
+                try {
+                    keyStore = KeyStore.getInstance("PKCS12");
+                    if (fis != null) fis.close();
+                    fis = new FileInputStream(pfxPath);
+                    keyStore.load(fis, pfxPwd.toCharArray());
+                    System.out.println("DEBUG: Loaded without EM provider");
+                } finally {
+                    if (Security.getProvider("EM") == null) {
+                        Security.addProvider(new emCastleProvider());
+                    }
+                }
+            } else {
+                throw e;
+            }
+        } finally {
+            if (fis != null) fis.close();
         }
 
         if (!keyStore.containsAlias(pfxAlias)) {

@@ -97,8 +97,16 @@ public class Pkcs7Cli {
 
                 System.out.println("\nSigning JSON...");
                 Map<String, Object> signedJson = Pkcs7Crypto.signJson(plainJson, PFX, PFX_PWD, PFX_ALIAS);
-                String signedJsonStr = gson.toJson(signedJson);
 
+                // Check if signing was successful
+                Object status = signedJson.get("status");
+                if (status != null && status.toString().equalsIgnoreCase("false")) {
+                    System.out.println("❌ Signing failed: " + signedJson.get("message"));
+                    System.out.println("⏭️ Skipping verification due to signing failure.");
+                    return;
+                }
+
+                String signedJsonStr = gson.toJson(signedJson);
                 System.out.println("\n✅ JSON signed successfully!");
 
                 // Ask to save signed JSON
@@ -157,6 +165,30 @@ public class Pkcs7Cli {
 
                 System.out.println("\nSigning JSON from file...");
                 Map<String, Object> signedJson = Pkcs7Crypto.signJson(plainJson, PFX, PFX_PWD, PFX_ALIAS);
+                Object status = signedJson.get("status");
+                if (status != null && status.toString().equalsIgnoreCase("false")) {
+                    System.out.println("❌ Signing failed with current PFX credentials.");
+
+                    System.out.print("Do you want to re-enter PFX details and retry? (Y/N): ");
+                    String retryConsent = scanner.nextLine().trim().toLowerCase();
+
+                    if (retryConsent.equals("y") || retryConsent.equals("yes")) {
+                        System.out.print("Enter new PFX file path: ");
+                        PFX = sanitizeFilePath(scanner.nextLine());
+
+                        System.out.print("Enter new PFX password: ");
+                        PFX_PWD = scanner.nextLine().trim();
+
+                        System.out.print("Enter new PFX alias: ");
+                        PFX_ALIAS = scanner.nextLine().trim();
+
+                        System.out.println("\n🔁 Retrying signing with new PFX...");
+                        signedJson = Pkcs7Crypto.signJson(plainJson, PFX, PFX_PWD, PFX_ALIAS);
+                    } else {
+                        System.out.println("⚠️ Skipping signing operation.");
+                        return;
+                    }
+                }
                 String signedJsonStr = gson.toJson(signedJson);
 
                 System.out.println("\n✅ JSON signed successfully!");
