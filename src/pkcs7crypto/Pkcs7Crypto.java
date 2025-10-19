@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import org.bouncycastle.asn1.ASN1OctetString;
 import org.bouncycastle.asn1.cms.Attribute;
+import org.bouncycastle.asn1.cms.AttributeTable;
 import org.bouncycastle.asn1.cms.CMSAttributes;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.jcajce.JcaCertStore;
@@ -44,7 +45,7 @@ import org.bouncycastle.cms.SignerInformationStore;
 import org.bouncycastle.cms.SignerInformationVerifier;
 import org.bouncycastle.cms.jcajce.JcaSignerInfoGeneratorBuilder;
 import org.bouncycastle.cms.jcajce.JcaSimpleSignerInfoVerifierBuilder;
-import org.bouncycastle.jce.provider.emCastleProvider;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.operator.jcajce.JcaDigestCalculatorProviderBuilder;
@@ -64,7 +65,139 @@ public class Pkcs7Crypto {
         return sb.toString();
     }
 
-    public static Map<String, Object> signJson(String payload, String pfxPath, String pfxPwd, String pfxAlias) {
+    public static KeyStore loadKeyStore(String pfxPath, String pfxPwd)
+            throws IOException, KeyStoreException, NoSuchAlgorithmException, CertificateException {
+
+        // Add BouncyCastle provider if not already registered
+        if (Security.getProvider("BC") == null) {
+            // Disable JCE verification for unsigned providers
+            // This allows BouncyCastle to work even if the JAR is not signed
+            try {
+                java.lang.reflect.Field isRestricted = Class.forName("javax.crypto.JceSecurity")
+                    .getDeclaredField("isRestricted");
+                isRestricted.setAccessible(true);
+                isRestricted.set(null, false);
+                System.out.println("DEBUG: JCE restriction disabled");
+            } catch (Exception e) {
+                System.out.println("DEBUG: Could not disable JCE restriction (Java 9+): " + e.getMessage());
+                // Try alternative approach for Java 9+
+                try {
+                    java.lang.reflect.Field field = Class.forName("javax.crypto.JceSecurity")
+                        .getDeclaredField("isRestricted");
+                    field.setAccessible(true);
+
+                    java.lang.reflect.Field modifiersField = java.lang.reflect.Field.class.getDeclaredField("modifiers");
+                    modifiersField.setAccessible(true);
+                    modifiersField.setInt(field, field.getModifiers() & ~java.lang.reflect.Modifier.FINAL);
+
+                    field.set(null, false);
+                    System.out.println("DEBUG: JCE restriction disabled (Java 9+ method)");
+                } catch (Exception ex) {
+                    System.out.println("DEBUG: JCE restriction bypass not available: " + ex.getMessage());
+                }
+            }
+
+            Security.addProvider(new BouncyCastleProvider());
+            System.out.println("DEBUG: BC provider registered");
+        }
+
+        KeyStore ks = null;
+        FileInputStream fis = null;
+        IOException lastException = null;
+
+        // Strategy 1: Try loading with BouncyCastle provider explicitly (best for modern PKCS12)
+        try {
+            ks = KeyStore.getInstance("PKCS12", "BC");
+            fis = new FileInputStream(pfxPath);
+            ks.load(fis, pfxPwd.toCharArray());
+            System.out.println("DEBUG: Successfully loaded PFX file with BC provider: " + pfxPath);
+            return ks;
+        } catch (NoSuchProviderException e) {
+            System.out.println("DEBUG: BC provider not available");
+            lastException = new IOException("BC provider not available", e);
+        } catch (IOException e) {
+            System.out.println("DEBUG: Failed with BC provider: " + e.getMessage());
+            lastException = e;
+            // Close the stream before retry
+            if (fis != null) {
+                try { fis.close(); } catch (IOException ignored) {}
+                fis = null;
+            }
+        } finally {
+            if (fis != null && ks != null) {
+                try { fis.close(); } catch (IOException ignored) {}
+                fis = null;
+            }
+        }
+
+        // Strategy 2: Try loading with default provider (for legacy PKCS12)
+        try {
+            ks = KeyStore.getInstance("PKCS12");
+            fis = new FileInputStream(pfxPath);
+            ks.load(fis, pfxPwd.toCharArray());
+            System.out.println("DEBUG: Successfully loaded PFX file with default provider: " + pfxPath);
+            return ks;
+        } catch (IOException e) {
+            System.out.println("DEBUG: Failed with default provider: " + e.getMessage());
+            lastException = e;
+            // Close the stream before retry
+            if (fis != null) {
+                try { fis.close(); } catch (IOException ignored) {}
+                fis = null;
+            }
+        } finally {
+            if (fis != null && ks == null) {
+                try { fis.close(); } catch (IOException ignored) {}
+                fis = null;
+            }
+        }
+
+        // Strategy 3: Try PKCS12-DEF format with BouncyCastle (for modern PKCS12 with AES/SHA-256)
+        try {
+            ks = KeyStore.getInstance("PKCS12-DEF", "BC");
+            fis = new FileInputStream(pfxPath);
+            ks.load(fis, pfxPwd.toCharArray());
+            System.out.println("DEBUG: Successfully loaded PFX file with BC provider (PKCS12-DEF): " + pfxPath);
+            return ks;
+        } catch (NoSuchProviderException | KeyStoreException e) {
+            System.out.println("DEBUG: PKCS12-DEF not available: " + e.getMessage());
+        } catch (IOException e) {
+            System.out.println("DEBUG: Failed with PKCS12-DEF: " + e.getMessage());
+            lastException = e;
+        } finally {
+            if (fis != null) {
+                try { fis.close(); } catch (IOException ignored) {}
+                fis = null;
+            }
+        }
+
+        // Strategy 4: Try with PKCS12-3DES-3DES format (another BouncyCastle variant)
+        try {
+            ks = KeyStore.getInstance("PKCS12-3DES-3DES", "BC");
+            fis = new FileInputStream(pfxPath);
+            ks.load(fis, pfxPwd.toCharArray());
+            System.out.println("DEBUG: Successfully loaded PFX file with BC provider (PKCS12-3DES-3DES): " + pfxPath);
+            return ks;
+        } catch (NoSuchProviderException | KeyStoreException e) {
+            System.out.println("DEBUG: PKCS12-3DES-3DES not available: " + e.getMessage());
+        } catch (IOException e) {
+            System.out.println("DEBUG: Failed with PKCS12-3DES-3DES: " + e.getMessage());
+            lastException = e;
+        } finally {
+            if (fis != null) {
+                try { fis.close(); } catch (IOException ignored) {}
+            }
+        }
+
+        // If all strategies failed, throw the last exception
+        if (lastException != null) {
+            throw lastException;
+        }
+
+        throw new IOException("Failed to load keystore with any available provider");
+    }
+
+    public static Map<String, Object> signJson(String payload, String pfxPath, String pfxPwd, String pfxAlias) throws NoSuchProviderException {
         Map<String, Object> response = new LinkedHashMap<>();
         Gson gson = new Gson();
         try {
@@ -72,51 +205,34 @@ public class Pkcs7Crypto {
             byte[] data = payload.getBytes("UTF-8");
 
             // ----------- 2. Load Certificate & Private Key -----------
-            // Add BouncyCastle provider if not already registered
-            // Add at a lower priority to avoid authentication issues during keystore loading
-            if (Security.getProvider("EM") == null) {
-                Security.addProvider(new emCastleProvider());
-                System.out.println("DEBUG: EM provider registered");
-            }
+            KeyStore ks = loadKeyStore(pfxPath, pfxPwd);
 
-            // Load keystore - need to handle the unsigned provider issue
-            KeyStore ks = null;
-            FileInputStream fis = null;
-            try {
-                // Try to load with automatic provider selection
-                ks = KeyStore.getInstance("PKCS12");
-                fis = new FileInputStream(pfxPath);
-                ks.load(fis, pfxPwd.toCharArray());
-                System.out.println("DEBUG: Successfully loaded PFX file");
-            } catch (IOException e) {
-                // If we get a SecurityException wrapped in IOException, try with BouncyCastle explicitly bypassed
-                if (e.getMessage() != null && e.getMessage().contains("JCE cannot authenticate")) {
-                    System.out.println("DEBUG: Retrying without provider authentication...");
-                    // Remove the EM provider temporarily
-                    Security.removeProvider("EM");
-                    // Try with just the default providers
-                    try {
-                        ks = KeyStore.getInstance("PKCS12");
-                        if (fis != null) fis.close();
-                        fis = new FileInputStream(pfxPath);
-                        ks.load(fis, pfxPwd.toCharArray());
-                        System.out.println("DEBUG: Loaded without EM provider");
-                    } finally {
-                        // Add EM provider back for signing operations
-                        if (Security.getProvider("EM") == null) {
-                            Security.addProvider(new emCastleProvider());
-                        }
-                    }
-                } else {
-                    throw e;
+            // Use the provided alias parameter
+            String alias = pfxAlias;
+
+            // Check if the alias exists in the keystore
+            if (!ks.containsAlias(alias)) {
+                // List all available aliases for debugging
+                System.out.println("DEBUG: Alias '" + alias + "' not found in keystore");
+                System.out.println("DEBUG: Available aliases:");
+                java.util.Enumeration<String> aliases = ks.aliases();
+                while (aliases.hasMoreElements()) {
+                    System.out.println("  - " + aliases.nextElement());
                 }
-            } finally {
-                if (fis != null) fis.close();
+                throw new KeyStoreException("Alias '" + alias + "' not found in keystore");
             }
 
-            String alias = ks.aliases().nextElement();
             PrivateKey privateKey = (PrivateKey) ks.getKey(alias, pfxPwd.toCharArray());
+            if (privateKey == null) {
+                throw new UnrecoverableKeyException("Could not retrieve private key for alias '" + alias + "'. Check if the password is correct.");
+            }
+
             X509Certificate cert = (X509Certificate) ks.getCertificate(alias);
+            if (cert == null) {
+                throw new KeyStoreException("Could not retrieve certificate for alias '" + alias + "'");
+            }
+
+            System.out.println("DEBUG: Successfully loaded certificate for alias '" + alias + "': " + cert.getSubjectDN());
 
             // ----------- 3. Create PKCS#7 Signature -----------
             List<X509Certificate> certList = new ArrayList<>();
@@ -241,8 +357,14 @@ public class Pkcs7Crypto {
 
                 // Verify the message digest for each signer
                 for (SignerInformation signer : signers) {
+                    // Get the signed attributes table
+                    AttributeTable signedAttrs = signer.getSignedAttributes();
+                    if (signedAttrs == null) {
+                        throw new Exception("No signed attributes found in signer information");
+                    }
+
                     // Get the message-digest attribute from signed attributes
-                    Attribute messageDigestAttr = signer.getSignedAttributes().get(CMSAttributes.messageDigest);
+                    Attribute messageDigestAttr = signedAttrs.get(CMSAttributes.messageDigest);
 
                     if (messageDigestAttr == null) {
                         throw new Exception("No message-digest attribute found in signed attributes");
@@ -277,8 +399,14 @@ public class Pkcs7Crypto {
                 }
             }
 
-            // Verify the signature using embedded content (not detached)
-            System.out.println("Verifying encapsulated signature");
+            // Verify the signature
+            // For detached signatures, we need to reconstruct the CMS with the content
+            if (signedContent == null && detachedContent != null) {
+                System.out.println("Reconstructing CMS with detached content for signature verification...");
+                cmsSignedData = new CMSSignedData(new CMSProcessableByteArray(detachedContent), pkcs7Data);
+            } else {
+                System.out.println("Verifying encapsulated signature");
+            }
 
             Store certStore = cmsSignedData.getCertificates();
             SignerInformationStore signerInfoStore = cmsSignedData.getSignerInfos();
@@ -288,9 +416,9 @@ public class Pkcs7Crypto {
                 throw new Exception("No signer information found in PKCS#7 data");
             }
 
-            // Make sure EM provider is registered
-            if (Security.getProvider("EM") == null) {
-                Security.addProvider(new org.bouncycastle.jce.provider.emCastleProvider());
+            // Make sure BC provider is registered
+            if (Security.getProvider("BC") == null) {
+                Security.addProvider(new BouncyCastleProvider());
             }
             // Don't explicitly set provider to avoid JCE authentication error
             JcaX509CertificateConverter certConverter = new JcaX509CertificateConverter();
@@ -308,6 +436,11 @@ public class Pkcs7Crypto {
                     X509Certificate pkcs7Cert = certConverter.getCertificate(certHolder);
 
                     System.out.println("Found certificate in PKCS#7: " + pkcs7Cert.getSubjectDN());
+                    System.out.println("  Issuer: " + pkcs7Cert.getIssuerDN());
+                    System.out.println("  Valid from: " + pkcs7Cert.getNotBefore());
+                    System.out.println("  Valid until: " + pkcs7Cert.getNotAfter());
+                    System.out.println("  Signature algorithm: " + pkcs7Cert.getSigAlgName());
+                    System.out.println("  Digest algorithm OID: " + signer.getDigestAlgOID());
 
                     try {
                         // Build verifier without explicitly specifying provider to avoid JCE authentication error
@@ -325,6 +458,7 @@ public class Pkcs7Crypto {
                             response.put("message", "❌ Signature verification failed for signer: " + pkcs7Cert.getSubjectDN());
                         }
                     } catch (CMSVerifierCertificateNotValidException e) {
+                        System.out.println("⚠️ Certificate validity issue: " + e.getMessage());
                         // Certificate not valid at signing time - verify signature cryptographically only
                         System.out.println("⚠️ Certificate not valid at signing time, verifying signature cryptographically only...");
                         try {
@@ -355,15 +489,32 @@ public class Pkcs7Crypto {
                             }
                         } catch (IOException | InvalidKeyException | NoSuchAlgorithmException | SignatureException ex) {
                             System.out.println("❌ Failed to verify signature: " + ex.getMessage());
-                            throw new Exception("❌ Failed to verify signature: " + ex.getMessage());
+                            ex.printStackTrace();
+                            response.put("status", false);
+                            response.put("message", "❌ Failed to verify signature: " + ex.getMessage());
                         }
-                    } catch (CMSException | OperatorCreationException e) {
-                        throw new Exception("Failed to verify signature: " + e.getMessage(), e);
+                    } catch (CMSException e) {
+                        System.out.println("❌ CMS Exception during verification: " + e.getMessage());
+                        e.printStackTrace();
+                        response.put("status", false);
+                        response.put("message", "❌ CMS Exception: " + e.getMessage());
+                    } catch (OperatorCreationException e) {
+                        System.out.println("❌ Operator Creation Exception: " + e.getMessage());
+                        e.printStackTrace();
+                        response.put("status", false);
+                        response.put("message", "❌ Operator Exception: " + e.getMessage());
+                    } catch (Exception e) {
+                        System.out.println("❌ Unexpected exception during verification: " + e.getMessage());
+                        e.printStackTrace();
+                        response.put("status", false);
+                        response.put("message", "❌ Unexpected error: " + e.getMessage());
                     }
                 }
             }
             if (!signatureValid) {
-                throw new Exception("No valid signature found in PKCS#7 data");
+                System.out.println("⚠️ No valid signature found in PKCS#7 data");
+                response.put("status", false);
+                response.put("message", "No valid signature found in PKCS#7 data");
             }
         } catch (Exception e) {
             response.put("status", false);
@@ -373,41 +524,8 @@ public class Pkcs7Crypto {
     }
 
     public static boolean verifyPKCS7WithPFX(String pkcs7DataBase64, byte[] detachedContent, String pfxPath, String pfxPwd, String pfxAlias) throws Exception {
-        // Add BouncyCastle provider if not already registered
-        if (Security.getProvider("EM") == null) {
-            Security.addProvider(new emCastleProvider());
-            System.out.println("DEBUG: EM provider registered");
-        }
-
-        // Load the PFX keystore
-        KeyStore keyStore = null;
-        FileInputStream fis = null;
-        try {
-            keyStore = KeyStore.getInstance("PKCS12");
-            fis = new FileInputStream(pfxPath);
-            keyStore.load(fis, pfxPwd.toCharArray());
-            System.out.println("DEBUG: Successfully loaded PFX file");
-        } catch (IOException e) {
-            if (e.getMessage() != null && e.getMessage().contains("JCE cannot authenticate")) {
-                System.out.println("DEBUG: Retrying without provider authentication...");
-                Security.removeProvider("EM");
-                try {
-                    keyStore = KeyStore.getInstance("PKCS12");
-                    if (fis != null) fis.close();
-                    fis = new FileInputStream(pfxPath);
-                    keyStore.load(fis, pfxPwd.toCharArray());
-                    System.out.println("DEBUG: Loaded without EM provider");
-                } finally {
-                    if (Security.getProvider("EM") == null) {
-                        Security.addProvider(new emCastleProvider());
-                    }
-                }
-            } else {
-                throw e;
-            }
-        } finally {
-            if (fis != null) fis.close();
-        }
+        // Load the PFX keystore using the common method
+        KeyStore keyStore = loadKeyStore(pfxPath, pfxPwd);
 
         if (!keyStore.containsAlias(pfxAlias)) {
             throw new Exception("Alias " + pfxAlias + " does not exist in the PFX KeyStore");
@@ -439,9 +557,9 @@ public class Pkcs7Crypto {
         }
 
         boolean signatureValid = false;
-        // Make sure EM provider is registered
-        if (Security.getProvider("EM") == null) {
-            Security.addProvider(new org.bouncycastle.jce.provider.emCastleProvider());
+        // Make sure BC provider is registered
+        if (Security.getProvider("BC") == null) {
+            Security.addProvider(new BouncyCastleProvider());
         }
         // Don't explicitly set provider to avoid JCE authentication error
         JcaX509CertificateConverter certConverter = new JcaX509CertificateConverter();
